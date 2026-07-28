@@ -98,6 +98,13 @@ bool RadioLibWrapper::isInRecvMode() const {
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   int len = 0;
   if (state & STATE_INT_READY) {
+    // setFlag() is the completion interrupt for a transmission as well as for a
+    // reception, and this test cannot tell the two apart. When the flag is
+    // consumed here while the radio is not in receive mode, the read returns
+    // whatever is still resident in the chip buffer -- after a transmit, that is
+    // our own outgoing frame. Counting those reads is what separates that
+    // failure from a genuine reception whose bytes were overwritten.
+    if ((state & ~STATE_INT_READY) != STATE_RX) n_read_not_rx++;
     len = _radio->getPacketLength();
     if (len > 0) {
       if (len > sz) { len = sz; }

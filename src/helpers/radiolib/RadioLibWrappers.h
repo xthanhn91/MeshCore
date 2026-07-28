@@ -8,6 +8,7 @@ protected:
   PhysicalLayer* _radio;
   mesh::MainBoard* _board;
   uint32_t n_recv, n_sent;
+  uint32_t n_read_not_rx;   // reads that consumed a completion flag while not in Rx
   int16_t _noise_floor, _threshold;
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
@@ -18,7 +19,7 @@ protected:
   virtual bool isReceivingPacket() =0;
 
 public:
-  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board) { n_recv = n_sent = 0; }
+  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board) { n_recv = n_sent = n_read_not_rx = 0; }
 
   void begin() override;
   virtual void powerOff() { _radio->sleep(); }
@@ -46,7 +47,15 @@ public:
 
   uint32_t getPacketsRecv() const { return n_recv; }
   uint32_t getPacketsSent() const { return n_sent; }
-  void resetStats() { n_recv = n_sent = 0; }
+
+  /**
+   * Reads that consumed a completion flag while the radio was not in receive
+   * mode. Non-zero means a transmission's completion interrupt was taken for a
+   * reception and the chip buffer was read back as if a frame had arrived.
+   */
+  uint32_t getReadsNotInRx() const { return n_read_not_rx; }
+
+  void resetStats() { n_recv = n_sent = n_read_not_rx = 0; }
 
   virtual float getLastRSSI() const override;
   virtual float getLastSNR() const override;
