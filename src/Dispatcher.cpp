@@ -120,6 +120,7 @@ void Dispatcher::checkRecv() {
 
       pkt = _mgr->allocNew();
       if (pkt == NULL) {
+        n_rx_pool_exhausted++;   // HopNet fork: this drop used to leave no trace but a debug print
         MESH_DEBUG_PRINTLN("%s Dispatcher::checkRecv(): WARNING: received data, no unused packets available!", getLogDateTime());
       } else {
         int i = 0;
@@ -227,6 +228,7 @@ void Dispatcher::checkSend() {
   if (_mgr->getOutboundCount(_ms->getMillis()) == 0) return;  // nothing waiting to send
   if (!millisHasNowPassed(next_tx_time)) return;   // still in 'radio silence' phase (from airtime budget setting)
   if (_radio->isReceiving()) {   // LBT - check if radio is currently mid-receive, or if channel activity
+    n_tx_deferred_rx_pending++;  // HopNet fork: how often we had traffic ready but no gap to send it
     if (cad_busy_start == 0) {
       cad_busy_start = _ms->getMillis();   // record when CAD busy state started
     }

@@ -122,6 +122,15 @@ class Dispatcher {
   bool  prev_isrecv_mode;
   uint32_t n_sent_flood, n_sent_direct;
   uint32_t n_recv_flood, n_recv_direct;
+  // HopNet fork: two losses this dispatcher used to take silently.
+  // n_rx_pool_exhausted -- a frame arrived and there was no free packet to put
+  // it in. Unlike obtainNewPacket() this path sets no err flag, so the frame
+  // vanished with only a debug print; a receiver starved of pool looks
+  // identical to a quiet channel from outside.
+  // n_tx_deferred_rx_pending -- transmissions held back by LBT because the
+  // radio was mid-receive. Not a fault, but without it a node that never gets
+  // a gap to transmit is indistinguishable from one with nothing to say.
+  uint32_t n_rx_pool_exhausted, n_tx_deferred_rx_pending;
 
   void processRecvPacket(Packet* pkt);
 
@@ -140,6 +149,7 @@ protected:
     cad_busy_start = 0;
     next_floor_calib_time = next_agc_reset_time = 0;
     _err_flags = 0;
+    n_rx_pool_exhausted = n_tx_deferred_rx_pending = 0;
     radio_nonrx_start = 0;
     prev_isrecv_mode = true;
   }
@@ -174,8 +184,15 @@ public:
   uint32_t getNumSentDirect() const { return n_sent_direct; }
   uint32_t getNumRecvFlood() const { return n_recv_flood; }
   uint32_t getNumRecvDirect() const { return n_recv_direct; }
+  uint32_t getRxPoolExhausted() const { return n_rx_pool_exhausted; }
+  uint32_t getTxDeferredRxPending() const { return n_tx_deferred_rx_pending; }
+  // HopNet fork: free slots in the inbound packet pool, right now. Paired with
+  // n_rx_pool_exhausted -- the counter says how often we already ran out, this
+  // says how close we are to running out again.
+  int getPacketPoolFree() const { return _mgr->getFreeCount(); }
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
+    n_rx_pool_exhausted = n_tx_deferred_rx_pending = 0;
     _err_flags = 0;
   }
 
