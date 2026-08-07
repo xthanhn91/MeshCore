@@ -203,14 +203,24 @@ bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
 }
 
 bool RadioLibWrapper::isSendComplete() {
-  uint32_t irq = resolvePendingIrq();
+  // Deliberately NOT gated on TX_DONE, and the reason is measured, not assumed.
+  //
+  // An earlier revision required `irq & _irq_tx_done` here, on the theory that a
+  // reception arriving just before the transmit was being consumed as a
+  // send-completion and retiring the packet early. On the bench that gate turned
+  // sends into TIMEOUTS: the same board, in the same spot, over the same 180s
+  // window, logged +30 logTxFail drops with the strict check and +0 without it,
+  // while the four boards beside it showed +7..+16. logTxFail DROPS the packet, so
+  // the cost was real transmissions lost -- traded against a defect that is only
+  // theorised. Waiting for a TX_DONE that does not arrive is worse than acting on
+  // a completion flag that is occasionally the wrong one.
+  //
+  // The anomaly-B fix does not depend on this. What stops our own frame coming
+  // back as an inbound one is the RX_DONE gate in recvRaw(); this function only
+  // decides when to retire an outbound packet.
+  resolvePendingIrq();   // still resolve, so a reception pending across the transmit
+                         // is recorded in _rx_pending rather than lost
   if (state & STATE_INT_READY) {
-    // Report the send finished only on evidence that OUR TRANSMIT is what completed.
-    // A flag raised by a reception that arrived just before the transmit started was
-    // previously consumed here and reported as send-complete, retiring the outbound
-    // packet while its bytes were still going on air -- the `tx_unfinished` case.
-    if (_irq_split_ok && (irq & _irq_tx_done) == 0) return false;
-
     state = STATE_IDLE;
     n_sent++;
     return true;
