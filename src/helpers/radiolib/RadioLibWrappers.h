@@ -9,17 +9,44 @@ protected:
   mesh::MainBoard* _board;
   uint32_t n_recv, n_sent;
   uint32_t n_read_not_rx;   // reads that consumed a completion flag while not in Rx
+  uint32_t n_recv_errors;   // readData() failures -- a frame arrived and was lost on the way out
   int16_t _noise_floor, _threshold;
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
 
+  /**
+   * A reception has COMPLETED and its bytes are still in the chip buffer, unread.
+   *
+   * Deliberately NOT a bit inside `state`. `state` is a mode word that four call
+   * sites assign wholesale (startSendRaw, isSendComplete, onSendFinished, idle), and
+   * an arrival signal stored in it is destroyed by every one of those assignments --
+   * the defect this member exists to end. Two independent facts, two variables.
+   */
+  bool _rx_pending;
+
+  /** Chip-specific IRQ bits for RX_DONE / TX_DONE, resolved once in begin(). */
+  uint32_t _irq_rx_done, _irq_tx_done;
+
+  /**
+   * False when this radio cannot report RX_DONE and TX_DONE separately. In that case
+   * every path below falls back to upstream's flag-alone behaviour rather than
+   * silently never receiving.
+   */
+  bool _irq_split_ok;
+
+  uint32_t resolvePendingIrq();
   void idle();
   void startRecv();
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
 
 public:
-  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board) { n_recv = n_sent = n_read_not_rx = 0; }
+  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board) {
+    n_recv = n_sent = n_read_not_rx = n_recv_errors = 0;
+    _rx_pending = false;
+    _irq_rx_done = _irq_tx_done = 0;
+    _irq_split_ok = false;
+  }
 
   void begin() override;
   virtual void powerOff() { _radio->sleep(); }
@@ -31,11 +58,13 @@ public:
   bool isInRecvMode() const override;
   bool isChannelActive();
 
-  bool isReceiving() override { 
+  bool isReceiving() override {
     if (isReceivingPacket()) return true;
 
     return isChannelActive();
   }
+
+  bool hasUnreadRx() override { return _rx_pending; }
 
   virtual float getCurrentRSSI() =0;
 
@@ -55,7 +84,15 @@ public:
    */
   uint32_t getReadsNotInRx() const { return n_read_not_rx; }
 
-  void resetStats() { n_recv = n_sent = n_read_not_rx = 0; }
+  /**
+   * Receptions the radio driver reported and then threw away: readData() returned
+   * something other than RADIOLIB_ERR_NONE, so the frame is indistinguishable from
+   * "nothing arrived" everywhere downstream. Upstream counts the same thing
+   * (`c16bcd2f`).
+   */
+  uint32_t getRecvErrors() const { return n_recv_errors; }
+
+  void resetStats() { n_recv = n_sent = n_read_not_rx = n_recv_errors = 0; }
 
   virtual float getLastRSSI() const override;
   virtual float getLastSNR() const override;

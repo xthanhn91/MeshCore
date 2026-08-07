@@ -74,6 +74,18 @@ public:
   */
   virtual bool isReceiving() { return false; }
 
+  /**
+   * \returns true if a received frame is sitting in the chip buffer and has not been
+   *          read out yet.
+   *
+   * HopNet fork. Distinct from isReceiving(), which asks whether a reception is in
+   * PROGRESS. This asks whether one has already COMPLETED and is still unread -- the
+   * state in which starting a transmit overwrites the frame before anyone sees it.
+   * Defaults to false so radio implementations that cannot tell (and the simulated
+   * radio in the native tests) keep their existing behaviour.
+  */
+  virtual bool hasUnreadRx() { return false; }
+
   virtual float getLastRSSI() const { return 0; }
   virtual float getLastSNR() const { return 0; }
 };
@@ -131,6 +143,17 @@ class Dispatcher {
   // radio was mid-receive. Not a fault, but without it a node that never gets
   // a gap to transmit is indistinguishable from one with nothing to say.
   uint32_t n_rx_pool_exhausted, n_tx_deferred_rx_pending;
+  // HopNet fork, anomaly-B:
+  // n_tx_deferred_rx_unread -- transmissions held back because a COMPLETED frame
+  // was still unread in the chip buffer. Deliberately NOT folded into
+  // n_tx_deferred_rx_pending: that one counts LBT (a reception in PROGRESS), it
+  // has a shipped catalog description saying so and a device baseline measured
+  // against it. Two mechanisms, two counters -- merging them would make the fix
+  // look effective by making its own evidence unreadable.
+  // n_cad_force_tx -- times checkSend() gave up waiting for the channel and
+  // transmitted anyway. This path bypasses every gate above it, including the
+  // unread-frame gate, so it is the one route by which anomaly-B can still occur.
+  uint32_t n_tx_deferred_rx_unread, n_cad_force_tx;
 
   void processRecvPacket(Packet* pkt);
 
@@ -150,6 +173,7 @@ protected:
     next_floor_calib_time = next_agc_reset_time = 0;
     _err_flags = 0;
     n_rx_pool_exhausted = n_tx_deferred_rx_pending = 0;
+    n_tx_deferred_rx_unread = n_cad_force_tx = 0;
     radio_nonrx_start = 0;
     prev_isrecv_mode = true;
   }
@@ -186,6 +210,8 @@ public:
   uint32_t getNumRecvDirect() const { return n_recv_direct; }
   uint32_t getRxPoolExhausted() const { return n_rx_pool_exhausted; }
   uint32_t getTxDeferredRxPending() const { return n_tx_deferred_rx_pending; }
+  uint32_t getTxDeferredRxUnread() const { return n_tx_deferred_rx_unread; }
+  uint32_t getCadForceTx() const { return n_cad_force_tx; }
   // HopNet fork: free slots in the inbound packet pool, right now. Paired with
   // n_rx_pool_exhausted -- the counter says how often we already ran out, this
   // says how close we are to running out again.
@@ -193,6 +219,7 @@ public:
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
     n_rx_pool_exhausted = n_tx_deferred_rx_pending = 0;
+    n_tx_deferred_rx_unread = n_cad_force_tx = 0;
     _err_flags = 0;
   }
 

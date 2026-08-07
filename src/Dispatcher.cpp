@@ -227,6 +227,24 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
 void Dispatcher::checkSend() {
   if (_mgr->getOutboundCount(_ms->getMillis()) == 0) return;  // nothing waiting to send
   if (!millisHasNowPassed(next_tx_time)) return;   // still in 'radio silence' phase (from airtime budget setting)
+  // HopNet fork, anomaly-B: a reception that has already COMPLETED and is still
+  // unread must not be overwritten by our own transmit. startTransmit() re-points the
+  // chip's buffer base and writes our frame there, so the arriving frame's bytes are
+  // destroyed before anyone reads them -- and the read that follows hands our own
+  // outgoing frame back as though a peer had sent it.
+  //
+  // This sits BEFORE the CAD block deliberately. Both of the other candidate sites
+  // were checked and rejected: isReceiving() is bypassed by the CAD force-transmit
+  // below, and returning false from startSendRaw() makes the caller DROP the packet
+  // (see the failure path further down) -- "send failed", not "defer".
+  //
+  // Starvation is bounded structurally rather than by a counter: loop() runs
+  // checkRecv() before checkSend(), and recvRaw() always consumes a pending frame
+  // when it sees one, so a deferral cannot outlive a single loop iteration.
+  if (_radio->hasUnreadRx()) {
+    n_tx_deferred_rx_unread++;
+    return;
+  }
   if (_radio->isReceiving()) {   // LBT - check if radio is currently mid-receive, or if channel activity
     n_tx_deferred_rx_pending++;  // HopNet fork: how often we had traffic ready but no gap to send it
     if (cad_busy_start == 0) {
@@ -235,6 +253,12 @@ void Dispatcher::checkSend() {
 
     if (_ms->getMillis() - cad_busy_start > getCADFailMaxDuration()) {
       _err_flags |= ERR_EVENT_CAD_TIMEOUT;
+      // HopNet fork: the one path that transmits over a channel it just measured as
+      // busy. It is reached by falling THROUGH this block, so it bypasses every gate
+      // above -- including the unread-frame gate -- and nothing had ever measured
+      // whether it fires. An earlier analysis concluded HopNet had no such path at
+      // all; it does, and this counter is how that stops being a guess.
+      n_cad_force_tx++;
 
       MESH_DEBUG_PRINTLN("%s Dispatcher::checkSend(): CAD busy max duration reached!", getLogDateTime());
       // channel activity has gone on too long... (Radio might be in a bad state)

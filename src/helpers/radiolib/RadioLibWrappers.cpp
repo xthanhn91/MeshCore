@@ -28,6 +28,21 @@ void RadioLibWrapper::begin() {
   _radio->setPacketReceivedAction(setFlag);  // this is also SentComplete interrupt
   state = STATE_IDLE;
 
+  // HopNet fork: setFlag() is ONE interrupt for two events (see the comment on the
+  // line above -- it is upstream's own). The chip does keep them apart, in its IRQ
+  // status register, so resolve the chip-specific bits for RX_DONE and TX_DONE once
+  // here rather than inferring the event from `state`, which cannot tell them apart.
+  _irq_rx_done = _radio->getIrqMapped(1UL << RADIOLIB_IRQ_RX_DONE);
+  _irq_tx_done = _radio->getIrqMapped(1UL << RADIOLIB_IRQ_TX_DONE);
+  _irq_split_ok = (_irq_rx_done != 0 && _irq_tx_done != 0);
+  _rx_pending = false;
+  if (!_irq_split_ok) {
+    // Fail OPEN, not closed: a radio that cannot report the two apart keeps
+    // upstream's flag-alone behaviour. Gating receives on a signal this chip never
+    // produces would stop it receiving altogether.
+    MESH_DEBUG_PRINTLN("RadioLibWrapper: WARNING: radio cannot separate RX_DONE from TX_DONE; anomaly-B protection disabled");
+  }
+
   if (_board->getStartupReason() == BD_STARTUP_RX_PACKET) {  // received a LoRa packet (while in deep sleep)
     setFlag(); // LoRa packet is already received
   }
@@ -43,6 +58,13 @@ void RadioLibWrapper::begin() {
 void RadioLibWrapper::idle() {
   _radio->standby();
   state = STATE_IDLE;   // need another startReceive()
+
+  // Only reached from startSendRaw()'s failure path. startTransmit() stages the frame
+  // into the chip buffer BEFORE it can report an error, so a reception that was
+  // waiting there may already be overwritten and there is no way to ask which. Drop
+  // the pending marker: losing one frame in a rare error path is the cheaper mistake
+  // than reading our own staged bytes back as an inbound frame.
+  _rx_pending = false;
 }
 
 void RadioLibWrapper::triggerNoiseFloorCalibrate(int threshold) {
@@ -95,27 +117,60 @@ bool RadioLibWrapper::isInRecvMode() const {
   return (state & ~STATE_INT_READY) == STATE_RX;
 }
 
+/**
+ * Decide what the shared completion interrupt actually meant.
+ *
+ * The ISR cannot do this itself: telling RX_DONE from TX_DONE means reading the
+ * chip's IRQ status over SPI, which an interrupt handler must not do. So setFlag()
+ * records only "something completed" and the answer is resolved here, in the polling
+ * context, from ONE SPI read that both callers share.
+ *
+ * A resolved reception is recorded in _rx_pending, which is sticky: it survives every
+ * `state = ...` assignment, so the arrival signal is no longer destroyed by our own
+ * transmit path. It is cleared only when the frame is actually read out, or when the
+ * transmit that overwrote the chip buffer finishes.
+ *
+ * \returns the raw IRQ status word (0 when no interrupt is outstanding).
+ */
+uint32_t RadioLibWrapper::resolvePendingIrq() {
+  if ((state & STATE_INT_READY) == 0) return 0;
+  if (!_irq_split_ok) return 0;
+
+  uint32_t irq = _radio->getIrqFlags();
+  if (irq & _irq_rx_done) _rx_pending = true;
+  return irq;
+}
+
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   int len = 0;
+  resolvePendingIrq();
+
   if (state & STATE_INT_READY) {
     // setFlag() is the completion interrupt for a transmission as well as for a
-    // reception, and this test cannot tell the two apart. When the flag is
-    // consumed here while the radio is not in receive mode, the read returns
-    // whatever is still resident in the chip buffer -- after a transmit, that is
-    // our own outgoing frame. Counting those reads is what separates that
-    // failure from a genuine reception whose bytes were overwritten.
+    // reception, and THIS test cannot tell the two apart -- the IRQ status read in
+    // resolvePendingIrq() can. Kept on its original predicate so the metric stays
+    // comparable across this fix: it still counts completion flags consumed outside
+    // receive mode, which is the anomaly-B discriminator it was minted for.
     if ((state & ~STATE_INT_READY) != STATE_RX) n_read_not_rx++;
-    len = _radio->getPacketLength();
-    if (len > 0) {
-      if (len > sz) { len = sz; }
-      int err = _radio->readData(bytes, len);
-      if (err != RADIOLIB_ERR_NONE) {
-        MESH_DEBUG_PRINTLN("RadioLibWrapper: error: readData(%d)", err);
-        len = 0;
-      } else {
-      //  Serial.print("  readData() -> "); Serial.println(len);
-        n_recv++;
+
+    // Read the chip buffer ONLY on evidence that a frame actually arrived. Without
+    // this test, a transmit's completion is read back as a reception and hands our
+    // own outgoing frame to the mesh as if a peer had sent it.
+    if (_rx_pending || !_irq_split_ok) {
+      len = _radio->getPacketLength();
+      if (len > 0) {
+        if (len > sz) { len = sz; }
+        int err = _radio->readData(bytes, len);
+        if (err != RADIOLIB_ERR_NONE) {
+          MESH_DEBUG_PRINTLN("RadioLibWrapper: error: readData(%d)", err);
+          n_recv_errors++;   // HopNet fork: this loss used to be invisible past the log line
+          len = 0;
+        } else {
+        //  Serial.print("  readData() -> "); Serial.println(len);
+          n_recv++;
+        }
       }
+      _rx_pending = false;   // read out (or empty) -- either way nothing is waiting
     }
     state = STATE_IDLE;   // need another startReceive()
   }
@@ -148,7 +203,14 @@ bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
 }
 
 bool RadioLibWrapper::isSendComplete() {
+  uint32_t irq = resolvePendingIrq();
   if (state & STATE_INT_READY) {
+    // Report the send finished only on evidence that OUR TRANSMIT is what completed.
+    // A flag raised by a reception that arrived just before the transmit started was
+    // previously consumed here and reported as send-complete, retiring the outbound
+    // packet while its bytes were still going on air -- the `tx_unfinished` case.
+    if (_irq_split_ok && (irq & _irq_tx_done) == 0) return false;
+
     state = STATE_IDLE;
     n_sent++;
     return true;
@@ -160,6 +222,13 @@ void RadioLibWrapper::onSendFinished() {
   _radio->finishTransmit();
   _board->onAfterTransmit();
   state = STATE_IDLE;
+
+  // The transmit rewrote the chip's buffer base and wrote our frame there, and
+  // finishTransmit() has just cleared the chip's IRQ status. Any reception that was
+  // still unread is therefore gone -- both its bytes and its arrival signal. Drop the
+  // pending marker rather than let recvRaw() read the buffer and hand our own
+  // outgoing frame back as an inbound one.
+  _rx_pending = false;
 }
 
 bool RadioLibWrapper::isChannelActive() {
