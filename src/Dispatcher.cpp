@@ -121,6 +121,13 @@ void Dispatcher::checkRecv() {
       pkt = _mgr->allocNew();
       if (pkt == NULL) {
         n_rx_pool_exhausted++;   // HopNet fork: this drop used to leave no trace but a debug print
+        // HopNet fork: the SAME allocation failure sets ERR_EVENT_FULL in
+        // obtainNewPacket(); only this path stayed silent. A received frame is
+        // dropped either way, so the error flag belongs on both — otherwise a
+        // node whose pool is drained by the inbound queue reports no error at
+        // all while its PDR falls, and the one place that says "out of packets"
+        // is the path that happens not to be the busy one.
+        _err_flags |= ERR_EVENT_FULL;
         MESH_DEBUG_PRINTLN("%s Dispatcher::checkRecv(): WARNING: received data, no unused packets available!", getLogDateTime());
       } else {
         int i = 0;
