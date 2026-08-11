@@ -233,7 +233,24 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
 
 void Dispatcher::checkSend() {
   if (_mgr->getOutboundCount(_ms->getMillis()) == 0) return;  // nothing waiting to send
-  if (!millisHasNowPassed(next_tx_time)) return;   // still in 'radio silence' phase (from airtime budget setting)
+  if (!millisHasNowPassed(next_tx_time)) {
+    // HopNet fork: a rescue call is exempt from our OWN politeness, and only that.
+    //
+    // next_tx_time is the airtime-budget silence (factor 2.0 — after any transmit
+    // the radio stays quiet for twice the airtime just sent). It is self-imposed:
+    // nothing on the channel requires it, and on 915 MHz full-duty there is no
+    // regulatory duty cycle behind it either. It also sat BEFORE anything was
+    // taken off the queue, so the HMP layer's SOS priority could not express
+    // itself at the transport at all — the one frame that must not wait waited
+    // like every other, at every hop.
+    //
+    // LBT is a different thing and is NOT bypassed: the unread-RX gate and the
+    // isReceiving()/CAD block below still run, because those prevent collisions
+    // and destroyed receptions. Skipping politeness is safe; skipping
+    // collision avoidance would make an SOS arrive as noise.
+    if (_mgr->getOutboundMinPriority(_ms->getMillis()) != 0) return;
+    n_sos_tx_window_bypass++;
+  }
   // HopNet fork, anomaly-B: a reception that has already COMPLETED and is still
   // unread must not be overwritten by our own transmit. startTransmit() re-points the
   // chip's buffer base and writes our frame there, so the arriving frame's bytes are

@@ -14,6 +14,10 @@ public:
   void add(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for);
   int count() const { return _num; }
   int countBefore(uint32_t now) const;
+  // HopNet fork: lowest priority VALUE (= most important) among entries already
+  // due, or 0xFF when none are. Lets checkSend() ask "is a rescue frame waiting?"
+  // without dequeuing one it may not be allowed to send yet.
+  uint8_t minPriorityBefore(uint32_t now) const;
   mesh::Packet* itemAt(int i) const { return _table[i]; }
   mesh::Packet* removeByIdx(int i);
 };
@@ -29,6 +33,7 @@ public:
   void queueOutbound(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) override;
   mesh::Packet* getNextOutbound(uint32_t now) override;
   int getOutboundCount(uint32_t now) const override;
+  uint8_t getOutboundMinPriority(uint32_t now) const override;
   int getFreeCount() const override;
   mesh::Packet* getOutboundByIdx(int i) override;
   mesh::Packet* removeOutboundByIdx(int i) override;

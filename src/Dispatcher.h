@@ -102,6 +102,11 @@ public:
   virtual void queueOutbound(Packet* packet, uint8_t priority, uint32_t scheduled_for) = 0;
   virtual Packet* getNextOutbound(uint32_t now) = 0;    // by priority
   virtual int getOutboundCount(uint32_t now) const = 0;
+  // HopNet fork: lowest priority VALUE among outbound entries already due, or
+  // 0xFF if none. NOT pure-virtual and defaults to 0xFF on purpose: an
+  // implementation that does not answer simply never triggers the priority-0
+  // exemption in checkSend(), which is the conservative direction.
+  virtual uint8_t getOutboundMinPriority(uint32_t now) const { (void)now; return 0xFF; }
   virtual int getFreeCount() const = 0;
   virtual Packet* getOutboundByIdx(int i) = 0;
   virtual Packet* removeOutboundByIdx(int i) = 0;
@@ -154,6 +159,11 @@ class Dispatcher {
   // transmitted anyway. This path bypasses every gate above it, including the
   // unread-frame gate, so it is the one route by which anomaly-B can still occur.
   uint32_t n_tx_deferred_rx_unread, n_cad_force_tx;
+  // n_sos_tx_window_bypass -- times a priority-0 (SOS) frame was let past the
+  // self-imposed airtime window. Without this the change is unmeasurable: the
+  // field A/B has to be able to say the exemption fired at all, and how often,
+  // rather than infer it from a latency that has a dozen other causes.
+  uint32_t n_sos_tx_window_bypass;
 
   void processRecvPacket(Packet* pkt);
 
@@ -173,7 +183,7 @@ protected:
     next_floor_calib_time = next_agc_reset_time = 0;
     _err_flags = 0;
     n_rx_pool_exhausted = n_tx_deferred_rx_pending = 0;
-    n_tx_deferred_rx_unread = n_cad_force_tx = 0;
+    n_tx_deferred_rx_unread = n_cad_force_tx = n_sos_tx_window_bypass = 0;
     radio_nonrx_start = 0;
     prev_isrecv_mode = true;
   }
@@ -212,6 +222,7 @@ public:
   uint32_t getTxDeferredRxPending() const { return n_tx_deferred_rx_pending; }
   uint32_t getTxDeferredRxUnread() const { return n_tx_deferred_rx_unread; }
   uint32_t getCadForceTx() const { return n_cad_force_tx; }
+  uint32_t getSosTxWindowBypass() const { return n_sos_tx_window_bypass; }
   // HopNet fork: free slots in the inbound packet pool, right now. Paired with
   // n_rx_pool_exhausted -- the counter says how often we already ran out, this
   // says how close we are to running out again.
@@ -219,7 +230,7 @@ public:
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;
     n_rx_pool_exhausted = n_tx_deferred_rx_pending = 0;
-    n_tx_deferred_rx_unread = n_cad_force_tx = 0;
+    n_tx_deferred_rx_unread = n_cad_force_tx = n_sos_tx_window_bypass = 0;
     _err_flags = 0;
   }
 
